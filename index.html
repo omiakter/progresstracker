@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -12,7 +13,7 @@
   import { getFirestore, collection, doc, setDoc, getDoc, getDocs, updateDoc, deleteDoc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
   // =====================================================
-  // 🔥 REPLACE WITH YOUR FIREBASE CONFIG
+  // 🔥 YOUR FIREBASE CONFIG
   // =====================================================
   const firebaseConfig = {
     apiKey: "AIzaSyBOm3DWegS_CGgdGSaW6J8GKeyIdy4ykEk",
@@ -65,13 +66,28 @@
     font-size: 15px;
   }
 
+  /* ── LOADING SCREEN ── */
+  #loading-screen {
+    position: fixed; inset: 0; z-index: 200;
+    background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px;
+  }
+  #loading-screen .spinner-lg {
+    width: 32px; height: 32px;
+    border: 3px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.6s linear infinite;
+  }
+  #loading-screen p { color: var(--text-muted); font-size: 13px; font-family: var(--font-mono); }
+
   /* ── SETUP OVERLAY ── */
   #setup-overlay {
     position: fixed; inset: 0; z-index: 100;
     background: var(--bg);
-    display: flex; align-items: center; justify-content: center;
+    display: none; align-items: center; justify-content: center;
     padding: 24px;
   }
+  #setup-overlay.visible { display: flex; }
   .setup-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -104,6 +120,7 @@
     font-weight: 600; cursor: pointer; transition: opacity 0.2s;
   }
   .btn-primary:hover { opacity: 0.88; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* ── LAYOUT ── */
   #app { display: none; min-height: 100vh; }
@@ -377,11 +394,17 @@
 </head>
 <body>
 
+<!-- LOADING SCREEN (shown while checking Firestore for saved config) -->
+<div id="loading-screen">
+  <div class="spinner-lg"></div>
+  <p>Loading tracker...</p>
+</div>
+
 <!-- SETUP OVERLAY -->
 <div id="setup-overlay">
   <div class="setup-card">
     <h1>// WEEKLY TRACKER</h1>
-    <p>Enter your group name and the names of all 4 members to get started. This is saved per-device.</p>
+    <p>Enter your group name and the names of all 4 members to get started. This config is saved to the cloud — your whole team will see it.</p>
     <div style="margin-bottom:16px">
       <div style="font-size:11px;font-family:var(--font-mono);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px">Group Name</div>
       <input class="setup-input" id="setup-group" placeholder="e.g. CS3201 Project Group" style="width:100%">
@@ -403,7 +426,7 @@
       <div class="member-dot" style="background:var(--m4)"></div>
       <input class="setup-input" id="m4" placeholder="Member 4 name">
     </div>
-    <button class="btn-primary" onclick="saveSetup()">Start Tracking →</button>
+    <button class="btn-primary" id="setup-btn" onclick="saveSetup()">Start Tracking →</button>
   </div>
 </div>
 
@@ -510,39 +533,91 @@ function showToast(message, type = 'error') {
   setTimeout(() => toast.remove(), 3000);
 }
 
-// ── INIT ──
-function init() {
-  const saved = localStorage.getItem('wt_setup');
-  if (saved) {
-    const d = JSON.parse(saved);
-    groupName = d.groupName;
-    members = d.members;
-    document.getElementById('setup-overlay').style.display = 'none';
-    document.getElementById('app').style.display = 'block';
-    document.getElementById('header-group').textContent = groupName;
-    document.getElementById('tv-group-name').textContent = groupName + ' — Overview';
-    populateMemberSelect();
-    loadCurrentWeek();
+// ══════════════════════════════════════════════════════
+// INIT: Load group config from FIRESTORE (not localStorage)
+// This means any device/browser loading the page will
+// see the same group name and members.
+// ══════════════════════════════════════════════════════
+async function init() {
+  if (!window._dbReady) {
+    document.addEventListener('firebase-ready', init, { once: true });
+    return;
+  }
+
+  try {
+    const { doc, getDoc } = window._firestore;
+    const configSnap = await getDoc(doc(window._db, 'config', 'group'));
+
+    if (configSnap.exists()) {
+      const data = configSnap.data();
+      groupName = data.groupName;
+      members = data.members;
+
+      document.getElementById('loading-screen').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+      document.getElementById('header-group').textContent = groupName;
+      document.getElementById('tv-group-name').textContent = groupName + ' — Overview';
+      populateMemberSelect();
+      loadCurrentWeek();
+    } else {
+      // No config saved yet — show setup form
+      document.getElementById('loading-screen').style.display = 'none';
+      document.getElementById('setup-overlay').classList.add('visible');
+    }
+  } catch (err) {
+    console.error('Failed to load config:', err);
+    document.getElementById('loading-screen').style.display = 'none';
+    document.getElementById('setup-overlay').classList.add('visible');
+    showToast('Could not load config: ' + err.message);
   }
 }
 
-function saveSetup() {
+// ── SAVE SETUP TO FIRESTORE ──
+async function saveSetup() {
   const gn = document.getElementById('setup-group').value.trim() || 'My Group';
   const m = [1,2,3,4].map(i => document.getElementById('m'+i).value.trim() || 'Member '+i);
-  groupName = gn; members = m;
-  localStorage.setItem('wt_setup', JSON.stringify({ groupName: gn, members: m }));
-  document.getElementById('setup-overlay').style.display = 'none';
-  document.getElementById('app').style.display = 'block';
-  document.getElementById('header-group').textContent = gn;
-  document.getElementById('tv-group-name').textContent = gn + ' — Overview';
-  populateMemberSelect();
-  loadCurrentWeek();
+
+  const btn = document.getElementById('setup-btn');
+  btn.innerHTML = '<span class="spinner"></span> Saving...';
+  btn.disabled = true;
+
+  try {
+    const { doc, setDoc } = window._firestore;
+    await setDoc(doc(window._db, 'config', 'group'), {
+      groupName: gn,
+      members: m,
+      updatedAt: Date.now()
+    });
+
+    groupName = gn;
+    members = m;
+
+    document.getElementById('setup-overlay').classList.remove('visible');
+    document.getElementById('app').style.display = 'block';
+    document.getElementById('header-group').textContent = gn;
+    document.getElementById('tv-group-name').textContent = gn + ' — Overview';
+    populateMemberSelect();
+    loadCurrentWeek();
+    showToast('Group saved to cloud!', 'success');
+
+  } catch (err) {
+    console.error('Failed to save setup:', err);
+    showToast('Failed to save setup: ' + err.message);
+  } finally {
+    btn.innerHTML = 'Start Tracking →';
+    btn.disabled = false;
+  }
 }
 
-function resetSetup() {
-  if (!confirm('Change group settings? Tasks will remain.')) return;
-  localStorage.removeItem('wt_setup');
-  location.reload();
+// ── RESET / EDIT SETUP ──
+async function resetSetup() {
+  if (!confirm('Change group settings? This will update for everyone.')) return;
+  document.getElementById('setup-group').value = groupName;
+  members.forEach((m, i) => {
+    document.getElementById('m' + (i + 1)).value = m;
+  });
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('setup-overlay').classList.add('visible');
 }
 
 function populateMemberSelect() {
@@ -574,7 +649,7 @@ function loadCurrentWeek() {
   }
 
   checkFirebaseConfig();
-  listenToWeek(currentWeek);
+  listenToTasks();
 }
 
 function checkFirebaseConfig() {
@@ -591,8 +666,8 @@ function checkFirebaseConfig() {
 }
 
 // ── FIRESTORE LISTENER ──
-function listenToWeek(week) {
-  const { collection, query, onSnapshot, orderBy } = window._firestore;
+function listenToTasks() {
+  const { collection, onSnapshot } = window._firestore;
   const db = window._db;
   const col = collection(db, 'tasks');
 
@@ -688,7 +763,7 @@ function renderSidebar() {
     <div class="stat-box"><div class="stat-num" style="color:var(--m4)">${allWeeks.size}</div><div class="stat-name">Weeks</div></div>`;
 }
 
-// ── ADD TASK (FIXED with error handling) ──
+// ── ADD TASK ──
 function toggleAddForm() {
   const f = document.getElementById('add-form');
   f.classList.toggle('open');
@@ -719,12 +794,11 @@ async function saveTask() {
       createdAt: Date.now()
     });
 
-    // Clear form only on success
     document.getElementById('task-title').value = '';
     document.getElementById('task-desc').value = '';
     document.getElementById('task-member').selectedIndex = 0;
     document.getElementById('add-form').classList.remove('open');
-    showToast('Task added successfully!', 'success');
+    showToast('Task added!', 'success');
 
   } catch (err) {
     console.error('Failed to save task:', err);
@@ -735,7 +809,7 @@ async function saveTask() {
   }
 }
 
-// ── TOGGLE DONE (FIXED with error handling) ──
+// ── TOGGLE DONE ──
 async function toggleTask(id, current) {
   try {
     const { doc, updateDoc } = window._firestore;
@@ -746,7 +820,7 @@ async function toggleTask(id, current) {
   }
 }
 
-// ── DELETE (FIXED with error handling) ──
+// ── DELETE ──
 async function deleteTask(id) {
   if (!confirm('Delete this task?')) return;
   try {
@@ -813,9 +887,6 @@ document.addEventListener('keydown', e => {
 });
 
 // ── START ──
-document.addEventListener('firebase-ready', () => {
-  if (members.length) loadCurrentWeek();
-});
 init();
 </script>
 </body>
